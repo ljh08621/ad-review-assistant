@@ -149,7 +149,7 @@ def review(data, config=None):
         item['location'] = f'第 {text[:pos].count(chr(10)) + 1} 行，字符 {pos + 1} 起' if pos >= 0 else '整体材料／缺失信息'
     blocked = any(x['rule_id'] == 'A-06' for x in items)
     conclusion = '必须人工复核，暂缓发布' if blocked else '发现疑似风险或证据缺口' if items else '本地未命中，无法完整判断' if mode == 'local' else 'AI 初筛未发现风险，待人工确认'
-    return dict(rule_version=RULEBOOK['version'], prompt_version='audit-v3.0', mode=mode, created_at=datetime.now(timezone.utc).isoformat(),
+    return dict(rule_version=RULEBOOK['version'], prompt_version='audit-v3.1', mode=mode, created_at=datetime.now(timezone.utc).isoformat(),
                 conclusion=conclusion, blocked=blocked, human_review=True,
                 completeness='用户声明材料完整，未经独立验证' if complete else '材料完整性未确认',
                 limitation='本地模式仅做关键词初筛；不判断完整合规，不核实补充资料。' if mode == 'local' else 'AI 仅做第一轮审核；未独立验证资料真实性。上传材料经过视觉模型识别，文字与视觉判断仍需人工核对。',

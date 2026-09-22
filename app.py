@@ -121,14 +121,12 @@ def review_text():
                 if corrected!=page['text']:
                     page['original_ocr_text']=page['text']
                     page['text']=corrected
-                    page['quality_issues'].append('识别文字经过人工修订，须对照原图复核；报告保留原始识别版本。')
+                    page.setdefault('review_notes', []).append('识别文字经过人工修订，请对照原图核对；已保留原始识别版本。')
         sections=[];quality=[];visual=[]
         for page in material['pages']:
             sections.append(f"\n\n【文件 {material['filename']} · 第{page['page']}页】\n"+page['text'])
             quality.extend(f"第{page['page']}页：{q}" for q in page['quality_issues'])
             visual.append(dict(page=page['page'], observations=page['visual_notes']))
-        if data.get('extraction_confirmed') is not True:
-            quality.append('上传材料的识别文字尚未人工核对。')
         data['text']=data.get('text','')+''.join(sections)
         cfg['_quality_issues']=quality;cfg['_visual_context']=visual
     def work():
@@ -138,6 +136,9 @@ def review_text():
                 if item['quote']:
                     pages=[str(p['page']) for p in material['pages'] if item['quote'] in p['text']]
                     if pages: item['location']=material['filename']+' · 第'+ '、'.join(pages)+'页（识别文本匹配，需核对原图）'
+            result['notices'] = [note for page in material['pages'] for note in page.get('review_notes', [])]
+            if data.get('extraction_confirmed') is not True:
+                result['notices'].append('识别文字尚未人工核对，请对照原图检查。此提醒不代表图片模糊或不完整。')
             result['material']=material
             result['completeness'] += '；已处理上传文件全部 '+str(material['page_count'])+' 页'
         return jsonify(result)

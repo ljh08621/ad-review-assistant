@@ -16,31 +16,41 @@ function error(text){$('error').className=text?'error':'hidden';$('error').textC
 function setBusy(value){busy=value;document.querySelectorAll('.input-panel input,.input-panel textarea,.input-panel button,.input-panel select,#sample').forEach(n=>n.disabled=value);$('review').textContent=value?'处理中，请稍候…':'检查发布风险'}
 function requestHeaders(json=false){const h={'X-Access-Code':$('access').value};if(json)h['Content-Type']='application/json';return h}
 async function responseData(res){let data;try{data=await res.json()}catch{throw new Error('服务返回异常或超时，请稍后重试。')}if(!res.ok)throw new Error(data.error||'处理失败');return data}
+function groupedFindings(r){
+const groups=new Map();for(const [i,f] of r.findings.entries()){const key=f.quote?JSON.stringify([f.quote,f.location]):`missing-${i}`;if(!groups.has(key))groups.set(key,{quote:f.quote,location:f.location,items:[]});groups.get(key).items.push(f)}
+return [...groups.values()].map(g=>({...g,risky:g.items.some(f=>f.status==='疑似风险'),high:g.items.some(f=>f.status==='疑似风险'&&f.level==='高'),gap:g.items.some(f=>f.status==='证据不足')})).sort((a,b)=>Number(b.high)-Number(a.high)||Number(b.risky)-Number(a.risky));
+}
+function groupLabel(g){return g.risky?(g.high?'疑似风险 · 优先处理':'疑似风险 · 需要修改'):'证据待核实'}
+function groupText(r){return groupedFindings(r).flatMap((g,i)=>[`${i+1}. ${g.quote||'材料与证明资料'}（${groupLabel(g)}）`,`位置：${g.location}`,...g.items.flatMap(f=>[`${f.rule_id} · ${f.risk_type} · ${f.status}`,`判断：${f.reason}`,`处理建议：${f.suggestion}`,...((f.missing_evidence||[]).length?[`需补充：${f.missing_evidence.join('；')}`]:[])]),''])}
 function render(r){
 report=r;const root=$('result');root.replaceChildren();
-const high=r.findings.filter(f=>f.level==='高').length;
-const gaps=r.findings.filter(f=>f.status==='证据不足').length;
+const groups=groupedFindings(r);
+const risks=groups.filter(g=>g.risky).length;
+const gaps=groups.filter(g=>g.gap).length;
 const hasIssues=r.findings.length>0;
 const decision=el('div',undefined,'decision'+(hasIssues?'':' neutral'));
 decision.append(el('strong',r.blocked?'暂缓发布 · 需要人工复核':hasIssues?'先处理以下问题，再确认发布':'未发现明显问题 · 待人工确认'));
 decision.append(el('p',r.blocked?'存在必须人工复核的内容，请先完成修改并交审核负责人确认。':hasIssues?'根据下方建议修改文案或补充资料，完成后重新检查。':'本次初筛未发现明显问题，不代表已获发布批准。'));
 root.append(decision);
-const stats=el('div',undefined,'stats');for(const [num,label] of [[r.findings.length,'待处理项'],[high,'高风险项'],[gaps,'待补充资料项']]){const card=el('div',undefined,'stat');card.append(el('b',String(num)),el('span',label));stats.append(card)}root.append(stats);
-const sorted=[...r.findings].sort((a,b)=>(a.level==='高'?0:1)-(b.level==='高'?0:1));
-for(const [i,f] of sorted.entries()){
-const card=el('article',undefined,'finding');const head=el('div',undefined,'finding-head');head.append(el('h3',`${i+1}. ${f.risk_type}`),el('span',f.level==='高'?'优先处理 · 高风险':f.status==='证据不足'?'需要补充资料':f.level+'风险','level'));
-card.append(head,el('div',f.quote||'材料完整性或证明资料尚需核实','quote'),el('p',f.location,'muted small'));
+const stats=el('div',undefined,'stats');for(const [num,label] of [[groups.length,'待处理内容'],[risks,'涉及疑似风险'],[gaps,'涉及证据待核实']]){const card=el('div',undefined,'stat');card.append(el('b',String(num)),el('span',label));stats.append(card)}root.append(stats);
+for(const note of r.notices||[])root.append(el('p',note,'notice'));
+if(groups.length)root.append(el('p','按原文与位置合并展示；同一内容可同时涉及风险与证据缺口，后两项统计不相加。','muted small'));
+for(const [i,g] of groups.entries()){
+const card=el('article',undefined,'finding');const head=el('div',undefined,'finding-head');head.append(el('h3',`${i+1}. ${[...new Set(g.items.map(f=>f.risk_type))].join(' / ')}`),el('span',groupLabel(g),'level'));
+card.append(head,el('div',g.quote||'材料或证明资料需要核实','quote'),el('p',g.location,'muted small'));
+for(const f of g.items){
+card.append(el('p',`${f.rule_id} · ${f.risk_type} · ${f.status}`,'muted small'));
 const action=el('p',undefined,'action');action.append(el('strong','建议处理：'),document.createTextNode(f.suggestion));card.append(action);
 if((f.missing_evidence||[]).length)card.append(el('p','需补充：'+f.missing_evidence.join('；'),'muted'));
-const detail=el('details');detail.append(el('summary','查看判断依据'),el('p',f.reason),el('p',`${f.rule_id} · ${f.requirement}`),el('p',`检查状态：${f.status}；需要人工审核：${f.human_review?'是':'否'}`));card.append(detail);root.append(card)}
+const detail=el('details');detail.append(el('summary','查看判断依据'),el('p',f.reason),el('p',`${f.rule_id} · ${f.requirement}`),el('p',`检查状态：${f.status}；规则预设等级：${f.level}（不代表已确认违规）；需要人工审核：${f.human_review?'是':'否'}`));card.append(detail)}root.append(card)}
 const details=el('details');details.append(el('summary','查看完整检查记录'));details.append(el('p',r.completeness,'muted'),el('p',r.limitation,'muted'));const table=el('table');for(const c of r.checks){const tr=el('tr');tr.append(el('td',c.rule_id),el('td',c.status),el('td',c.reason));table.append(tr)}details.append(table,el('p',`规则版本 ${r.rule_version} · ${r.prompt_version||''}`,'muted small'));const jsonButton=el('button','下载结构化记录');jsonButton.onclick=()=>{const url=URL.createObjectURL(new Blob([JSON.stringify(r,null,2)],{type:'application/json'}));const a=el('a');a.href=url;a.download='广告审核记录.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000)};details.append(jsonButton);root.append(details,el('p',`检查时间：${new Date(r.created_at).toLocaleString()}。修改内容后请重新检查；本报告不替代人工发布确认。`,'report-note'));
 $('export').disabled=false;$('print').disabled=false;$('copy').disabled=false;
 }
 function reportText(r){
-return ['发布前检查报告',`检查时间：${new Date(r.created_at).toLocaleString()}`,`结论：${r.conclusion}`,`需要人工审核：${r.human_review?'是':'否'}`,'',...r.findings.flatMap((f,i)=>[`${i+1}. ${f.risk_type}（${f.level}风险）`,`原文：${f.quote||'整体材料或缺失信息'}`,`位置：${f.location}`,`依据：${f.rule_id} ${f.requirement}`,`判断：${f.reason}`,`修改建议：${f.suggestion}`,`待补充：${(f.missing_evidence||[]).join('；')||'见修改建议'}`,'']),'检查范围与限制',r.completeness,r.limitation,'',...r.checks.map(c=>`${c.rule_id} · ${c.status}：${c.reason}`),`规则版本：${r.rule_version}；提示词版本：${r.prompt_version||''}`].join('\n');
+return ['发布前检查报告',`检查时间：${new Date(r.created_at).toLocaleString()}`,`结论：${r.conclusion}`,`需要人工审核：${r.human_review?'是':'否'}`,'',...groupText(r),'核对提醒',...(r.notices||[]),'检查范围与限制',r.completeness,r.limitation,'',...r.checks.map(c=>`${c.rule_id} · ${c.status}：${c.reason}`),`规则版本：${r.rule_version}；提示词版本：${r.prompt_version||''}`].join('\n');
 }
 function checklistText(r){
-return ['内容整改清单',`审核建议：${r.conclusion}`,'',...r.findings.flatMap((f,i)=>[`${i+1}. ${f.risk_type}（${f.level}风险）`,`原文：${f.quote||'整体材料或缺失信息'}`,`位置：${f.location}`,`处理建议：${f.suggestion}`,...((f.missing_evidence||[]).length?[`需补充：${f.missing_evidence.join('；')}`]:[]),'']),'请修改或补充资料后重新检查，并由审核负责人确认发布。'].join('\n');
+return ['内容整改清单',`审核建议：${r.conclusion}`,'',...groupText(r),...(r.notices||[]),'请修改或补充资料后重新检查，并由审核负责人确认发布。'].join('\n');
 }
 $('copy').onclick=async()=>{if(!report)return;try{await navigator.clipboard.writeText(checklistText(report));$('copyStatus').textContent='已复制，可直接发送给内容负责人。'}catch{$('copyStatus').textContent='浏览器未允许复制，请点击“下载报告”后分享。'}};
 async function run(){if(busy)return;error('');if(!$('text').value.trim()&&!materialToken&&!$('upload').files.length)return error('请输入文字或选择图片 / PDF。');if(($('mode').value==='ai'||$('upload').files.length)&&!$('consent').checked)return error('请先勾选允许处理材料。');if($('upload').files[0]?.size>8*1024*1024)return error('文件超过8 MB。');clearResult();setBusy(true);$('result').replaceChildren(el('div','正在逐条检查，本次尚未产生结论……','empty'));try{if($('upload').files.length&&!materialToken)await extractSelected();$('review').textContent='正在审核…';const res=await fetch('/api/review',{method:'POST',headers:requestHeaders(true),body:JSON.stringify({text:$('text').value,evidence:$('evidence').value,complete:$('complete').checked,mode:$('mode').value,consent:$('consent').checked,material_token:materialToken,extraction_confirmed:$('confirmed').checked,page_corrections:material?Array.from(document.querySelectorAll('.page-correction')).map(n=>n.value):null})});render(await responseData(res))}catch(e){error(e.message);$('result').replaceChildren(el('div','本次审核未完成，没有可用结论。','empty'))}finally{setBusy(false)}}

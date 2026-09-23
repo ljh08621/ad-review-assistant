@@ -40,8 +40,6 @@ def local_checks(text, complete):
     rows = []
     for rule in RULES:
         if rule['id'] == 'A-10':
-            if not complete:
-                rows.append(finding(rule, '', '未确认材料完整，须提交完整材料。', '证据不足'))
             continue
         matches = list(re.finditer(rule['pattern'], text))
         for match in matches:
@@ -144,7 +142,7 @@ def review(data, config=None):
         checks, items = ai_review(text, evidence, complete, config or {})
         scope = getattr(checks, 'scope', {'status':'in_scope','reason':'按宣传材料审核'})
         if scope['status'] != 'in_scope':
-            return dict(rule_version=RULEBOOK['version'],prompt_version='audit-v3.2',mode=mode,
+            return dict(rule_version=RULEBOOK['version'],prompt_version='audit-v3.8',mode=mode,
                         created_at=datetime.now(timezone.utc).isoformat(),scope=scope,
                         conclusion='本次材料不适用于广告审核' if scope['status']=='out_of_scope' else '暂无法确定材料是否属于广告宣传',
                         blocked=False,human_review=True,findings=[],checks=[],
@@ -171,8 +169,9 @@ def review(data, config=None):
         item['location'] = f'第 {text[:pos].count(chr(10)) + 1} 行，字符 {pos + 1} 起' if pos >= 0 else '整体材料／缺失信息'
     blocked = any(x['rule_id'] == 'A-06' for x in items)
     conclusion = '必须人工复核，暂缓发布' if blocked else '发现疑似风险或证据缺口' if items else '本地未命中，无法完整判断' if mode == 'local' else 'AI 初筛未发现风险，待人工确认'
-    return dict(rule_version=RULEBOOK['version'], prompt_version='audit-v3.2', mode=mode, created_at=datetime.now(timezone.utc).isoformat(),
+    return dict(rule_version=RULEBOOK['version'], prompt_version='audit-v3.8', mode=mode, created_at=datetime.now(timezone.utc).isoformat(),
                 conclusion=conclusion, blocked=blocked, human_review=True,
                 completeness='用户声明材料完整，未经独立验证' if complete else '材料完整性未确认',
                 limitation='本地模式仅做关键词初筛；不判断完整合规，不核实补充资料。' if mode == 'local' else 'AI 仅做第一轮审核；未独立验证资料真实性。上传材料经过视觉模型识别，文字与视觉判断仍需人工核对。',
+                notices=[] if complete else ['尚未确认材料完整性；请确认已提交全部待发布内容。此提醒不代表已发现缺页。'],
                 findings=items, checks=checks)

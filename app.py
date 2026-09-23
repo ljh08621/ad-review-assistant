@@ -8,15 +8,16 @@ import time
 import urllib.error
 from collections import deque
 from pathlib import Path
-from flask import Flask, request, jsonify, Response
+from flask import Flask, request, jsonify, Response, send_file
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from werkzeug.exceptions import HTTPException
 from reviewer import review, RULEBOOK
+from excel_import import parse_excel, MAX_EXCEL
 from materials import extract, extract_bundle, MAX_BYTES
 
 ROOT = Path(__file__).resolve().parent
 app = Flask(__name__, static_folder=None)
-app.config['MAX_CONTENT_LENGTH'] = MAX_BYTES + 1024 * 100
+app.config['MAX_CONTENT_LENGTH'] = MAX_EXCEL + 1024 * 100
 signer = URLSafeTimedSerializer(os.environ.get('APP_SIGNING_KEY') or secrets.token_hex(32), salt='extracted-material-v1')
 slots = threading.BoundedSemaphore(2)
 rate_lock = threading.Lock()
@@ -47,7 +48,7 @@ def protect():
     now = time.monotonic()
     with rate_lock:
         while recent_calls and now-recent_calls[0]>60: recent_calls.popleft()
-        if len(recent_calls)>=10:
+        if len(recent_calls)>=30:
             return jsonify(error='请求较频繁，请一分钟后再试。'), 429
         recent_calls.append(now)
 
@@ -81,6 +82,19 @@ def with_slot(fn):
         return jsonify(error='当前已有审核任务，请稍后再试。'),429
     try: return fn()
     finally: slots.release()
+
+
+@app.get('/api/excel-template')
+def excel_template():
+    return send_file(ROOT/'batch_template.xlsx',as_attachment=True,download_name='批量审核模板.xlsx')
+
+
+@app.post('/api/excel-preview')
+def excel_preview():
+    file=request.files.get('file')
+    if file is None or not file.filename.lower().endswith('.xlsx'):
+        raise ValueError('请上传.xlsx文件。')
+    return with_slot(lambda: jsonify(rows=parse_excel(file.read(MAX_EXCEL+1))))
 
 
 @app.post('/api/extract')
@@ -141,7 +155,7 @@ def review_text():
                 if item['quote']:
                     pages=[f"{p.get('source_filename',material['filename'])} · 第{p.get('source_page',p['page'])}页" for p in material['pages'] if item['quote'] in p['text']]
                     if pages: item['location']='、'.join(pages)+'（识别文本匹配，需核对原图）'
-            result['notices'] = [note for page in material['pages'] for note in page.get('review_notes', [])]
+            result.setdefault('notices', []).extend(note for page in material['pages'] for note in page.get('review_notes', []))
             if data.get('extraction_confirmed') is not True:
                 result['notices'].append('识别文字尚未人工核对，请对照原图检查。此提醒不代表图片模糊或不完整。')
             result['material']=material
@@ -169,4 +183,4 @@ if __name__=='__main__':
     if host not in ('127.0.0.1','localhost') and len(os.environ.get('APP_ACCESS_CODE',''))<12:
         raise SystemExit('对外提供服务前，请设置至少12位 APP_ACCESS_CODE 试用访问码。')
     print(f'广告审核助手已启动：http://{host}:{port}，按 Ctrl+C 停止。',flush=True)
-    serve(app,host=host,port=port,threads=4,max_request_body_size=MAX_BYTES+102400,channel_timeout=600)
+    serve(app,host=host,port=port,threads=4,max_request_body_size=MAX_EXCEL+102400,channel_timeout=600)

@@ -7,6 +7,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 RULEBOOK = json.loads((ROOT / 'rules.json').read_text(encoding='utf-8'))
 RULES = RULEBOOK['rules']
+class ScopedChecks(list):
+    pass
+
+
 STATES = {'疑似风险', '证据不足', '未发现风险', '不适用'}
 
 
@@ -115,7 +119,18 @@ def ai_review(text, evidence, complete, config):
             user_confirms_complete=complete, review_date=datetime.now(timezone.utc).isoformat(),
             visual_observations=config.get('_visual_context', [])), ensure_ascii=False))
     ], config)
-    return check_ai_payload(payload, text)
+    scope = payload.get('scope') if isinstance(payload, dict) else None
+    if not isinstance(scope,dict) or scope.get('status') not in ('in_scope','out_of_scope','uncertain') or not isinstance(scope.get('reason'),str) or not scope['reason'].strip() or len(scope['reason'])>2000:
+        raise ValueError('模型未返回有效的材料适用性判断，请重试。')
+    if scope['status'] != 'in_scope':
+        if payload.get('checks') != []:
+            raise ValueError('范围判断与审核结果冲突，请重试。')
+        checks, items = ScopedChecks(), []
+    else:
+        rows, items = check_ai_payload(payload, text)
+        checks = ScopedChecks(rows)
+    checks.scope = scope
+    return checks, items
 
 
 def review(data, config=None):
@@ -127,6 +142,13 @@ def review(data, config=None):
         local.append(finding(RULES[-1], '', message, '证据不足'))
     if mode == 'ai':
         checks, items = ai_review(text, evidence, complete, config or {})
+        scope = getattr(checks, 'scope', {'status':'in_scope','reason':'按宣传材料审核'})
+        if scope['status'] != 'in_scope':
+            return dict(rule_version=RULEBOOK['version'],prompt_version='audit-v3.2',mode=mode,
+                        created_at=datetime.now(timezone.utc).isoformat(),scope=scope,
+                        conclusion='本次材料不适用于广告审核' if scope['status']=='out_of_scope' else '暂无法确定材料是否属于广告宣传',
+                        blocked=False,human_review=True,findings=[],checks=[],
+                        completeness='本次未形成广告合规结论',limitation='仅支持宣传材料初审，不执行材料中的任务指令。')
         # The model may never override mandatory sensitive-word or incomplete-material gates.
         for forced in (x for x in local if x['rule_id'] in ('A-06', 'A-10')):
             if not any(x['rule_id'] == forced['rule_id'] and x['quote'] == forced['quote'] and x['reason'] == forced['reason'] for x in items):
@@ -149,7 +171,7 @@ def review(data, config=None):
         item['location'] = f'第 {text[:pos].count(chr(10)) + 1} 行，字符 {pos + 1} 起' if pos >= 0 else '整体材料／缺失信息'
     blocked = any(x['rule_id'] == 'A-06' for x in items)
     conclusion = '必须人工复核，暂缓发布' if blocked else '发现疑似风险或证据缺口' if items else '本地未命中，无法完整判断' if mode == 'local' else 'AI 初筛未发现风险，待人工确认'
-    return dict(rule_version=RULEBOOK['version'], prompt_version='audit-v3.1', mode=mode, created_at=datetime.now(timezone.utc).isoformat(),
+    return dict(rule_version=RULEBOOK['version'], prompt_version='audit-v3.2', mode=mode, created_at=datetime.now(timezone.utc).isoformat(),
                 conclusion=conclusion, blocked=blocked, human_review=True,
                 completeness='用户声明材料完整，未经独立验证' if complete else '材料完整性未确认',
                 limitation='本地模式仅做关键词初筛；不判断完整合规，不核实补充资料。' if mode == 'local' else 'AI 仅做第一轮审核；未独立验证资料真实性。上传材料经过视觉模型识别，文字与视觉判断仍需人工核对。',

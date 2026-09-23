@@ -12,7 +12,7 @@ from flask import Flask, request, jsonify, Response
 from itsdangerous import URLSafeTimedSerializer, BadSignature, SignatureExpired
 from werkzeug.exceptions import HTTPException
 from reviewer import review, RULEBOOK
-from materials import extract, MAX_BYTES
+from materials import extract, extract_bundle, MAX_BYTES
 
 ROOT = Path(__file__).resolve().parent
 app = Flask(__name__, static_folder=None)
@@ -87,13 +87,16 @@ def with_slot(fn):
 def extract_file():
     if request.form.get('consent')!='true':
         raise ValueError('请确认允许将文件发送至配置的视觉模型。')
-    file=request.files.get('file')
-    if file is None or not file.filename:
-        raise ValueError('请选择图片或 PDF。')
-    raw=file.read(MAX_BYTES+1)
+    files=request.files.getlist('file')
+    if not 1 <= len(files) <= 4 or any(not f.filename for f in files):
+        raise ValueError('请选择1～4个图片或PDF文件。')
+    inputs=[(f.filename,f.read(MAX_BYTES+1)) for f in files]
+    if sum(len(raw) for _,raw in inputs)>MAX_BYTES:
+        raise ValueError('一组材料总大小不能超过8 MB。')
     def work():
-        material=extract(file.filename,raw,configuration())
-        return jsonify(material=material, token=signer.dumps(material))
+        started=time.monotonic()
+        material=extract_bundle(inputs,configuration())
+        return jsonify(material=material, token=signer.dumps(material), extraction_seconds=round(time.monotonic()-started,1))
     return with_slot(work)
 
 
@@ -124,18 +127,20 @@ def review_text():
                     page.setdefault('review_notes', []).append('识别文字经过人工修订，请对照原图核对；已保留原始识别版本。')
         sections=[];quality=[];visual=[]
         for page in material['pages']:
-            sections.append(f"\n\n【文件 {material['filename']} · 第{page['page']}页】\n"+page['text'])
+            sections.append(f"\n\n【材料序号{page['page']} · 文件 {page.get('source_filename', material['filename'])} · 第{page.get('source_page',page['page'])}页】\n"+page['text'])
             quality.extend(f"第{page['page']}页：{q}" for q in page['quality_issues'])
             visual.append(dict(page=page['page'], observations=page['visual_notes']))
         data['text']=data.get('text','')+''.join(sections)
         cfg['_quality_issues']=quality;cfg['_visual_context']=visual
     def work():
+        started=time.monotonic()
         result=review(data,cfg)
+        result["review_seconds"]=round(time.monotonic()-started,1)
         if material:
             for item in result['findings']:
                 if item['quote']:
-                    pages=[str(p['page']) for p in material['pages'] if item['quote'] in p['text']]
-                    if pages: item['location']=material['filename']+' · 第'+ '、'.join(pages)+'页（识别文本匹配，需核对原图）'
+                    pages=[f"{p.get('source_filename',material['filename'])} · 第{p.get('source_page',p['page'])}页" for p in material['pages'] if item['quote'] in p['text']]
+                    if pages: item['location']='、'.join(pages)+'（识别文本匹配，需核对原图）'
             result['notices'] = [note for page in material['pages'] for note in page.get('review_notes', [])]
             if data.get('extraction_confirmed') is not True:
                 result['notices'].append('识别文字尚未人工核对，请对照原图检查。此提醒不代表图片模糊或不完整。')

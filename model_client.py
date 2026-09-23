@@ -22,6 +22,8 @@ def call_json(messages, config, vision=False):
     base = normalize_base_url(config.get('base_url', ''))
     model = config.get('vision_model', 'qwen-vl-plus') if vision else config.get('model', 'qwen-plus')
     body = dict(model=model, messages=messages, response_format={'type':'json_object'}, stream=False, temperature=0)
+    if vision and model == 'qwen3.8-flash':
+        body['enable_thinking'] = False
     if not vision and 'enable_thinking' in config:
         if not isinstance(config['enable_thinking'], bool):
             raise ValueError('enable_thinking 必须为 true 或 false。')

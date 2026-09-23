@@ -57,6 +57,38 @@ def local_checks(text, complete):
     return rows
 
 
+def restore_quote(quote, text):
+    if not quote or quote in text:
+        return quote
+    # Only layout whitespace may differ; punctuation, words and digits stay exact.
+    characters=[c for c in quote if not c.isspace()]
+    if not characters:
+        raise ValueError('AI 引用原文为空白，无法定位。')
+    expression=r'\s*'.join(re.escape(c) for c in characters)
+    matches=list(re.finditer(expression,text))
+    if len(matches)!=1:
+        raise ValueError('AI 引用原文无法唯一定位，请重试或人工审核。')
+    return matches[0].group()
+
+
+def assign_claim_groups(items, text):
+    spans=[]
+    for index,item in enumerate(items):
+        quote=item['quote']
+        start=text.find(quote) if quote else -1
+        if start<0 or text.find(quote,start+1)>=0:
+            continue
+        spans.append((index,start,start+len(quote)))
+    # A group must have one actual quote containing all its members.
+    groups=[]
+    for index,start,end in sorted(spans,key=lambda x:-(x[2]-x[1])):
+        group=next((g for g in groups if g[0]<=start and end<=g[1]),None)
+        if group is None:
+            group=(start,end,f'claim-{index}');groups.append(group)
+        items[index]['claim_group']=group[2]
+        items[index]['claim_quote']=text[group[0]:group[1]]
+
+
 def check_ai_payload(payload, text):
     checks = payload.get('checks') if isinstance(payload, dict) else None
     if not isinstance(checks, list) or len(checks) != 10:
@@ -73,8 +105,7 @@ def check_ai_payload(payload, text):
         for field in ('quote', 'reason', 'suggestion'):
             if not isinstance(row.get(field), str) or len(row[field]) > 5000:
                 raise ValueError('AI 字段格式无效。')
-        if row['quote'] and row['quote'] not in text:
-            raise ValueError('AI 引用原文无法在输入中定位，请重试或人工审核。')
+        row['quote'] = restore_quote(row['quote'], text)
         if not row['reason'].strip():
             raise ValueError('AI 缺少判断依据。')
         issues = row.get('issues')
@@ -89,8 +120,7 @@ def check_ai_payload(payload, text):
                 raise ValueError('AI 子问题状态无效。')
             if any(not isinstance(issue.get(k),str) or len(issue[k])>5000 for k in ('quote','reason','suggestion')):
                 raise ValueError('AI 子问题字段无效。')
-            if issue['quote'] and issue['quote'] not in text:
-                raise ValueError('AI 子问题引用不在原文中。')
+            issue['quote'] = restore_quote(issue['quote'], text)
             if not issue['reason'].strip():
                 raise ValueError('AI 子问题缺少判断依据。')
             missing = issue.get('missing_evidence', [])
@@ -142,7 +172,7 @@ def review(data, config=None):
         checks, items = ai_review(text, evidence, complete, config or {})
         scope = getattr(checks, 'scope', {'status':'in_scope','reason':'按宣传材料审核'})
         if scope['status'] != 'in_scope':
-            return dict(rule_version=RULEBOOK['version'],prompt_version='audit-v3.8',mode=mode,
+            return dict(rule_version=RULEBOOK['version'],prompt_version='audit-v3.9',mode=mode,
                         created_at=datetime.now(timezone.utc).isoformat(),scope=scope,
                         conclusion='本次材料不适用于广告审核' if scope['status']=='out_of_scope' else '暂无法确定材料是否属于广告宣传',
                         blocked=False,human_review=True,findings=[],checks=[],
@@ -164,12 +194,13 @@ def review(data, config=None):
             relevant = [x for x in items if x['rule_id'] == rule['id']]
             checks.append(dict(rule_id=rule['id'], status=(relevant[0]['status'] if relevant else '待语义复核'),
                                reason='；'.join(x['reason'] for x in relevant) if relevant else '关键词未命中不能证明合规；本地模式不执行完整语义与证据核验。'))
+    assign_claim_groups(items, text)
     for item in items:
         pos = text.find(item['quote']) if item['quote'] else -1
         item['location'] = f'第 {text[:pos].count(chr(10)) + 1} 行，字符 {pos + 1} 起' if pos >= 0 else '整体材料／缺失信息'
     blocked = any(x['rule_id'] == 'A-06' for x in items)
     conclusion = '必须人工复核，暂缓发布' if blocked else '发现疑似风险或证据缺口' if items else '本地未命中，无法完整判断' if mode == 'local' else 'AI 初筛未发现风险，待人工确认'
-    return dict(rule_version=RULEBOOK['version'], prompt_version='audit-v3.8', mode=mode, created_at=datetime.now(timezone.utc).isoformat(),
+    return dict(rule_version=RULEBOOK['version'], prompt_version='audit-v3.9', mode=mode, created_at=datetime.now(timezone.utc).isoformat(),
                 conclusion=conclusion, blocked=blocked, human_review=True,
                 completeness='用户声明材料完整，未经独立验证' if complete else '材料完整性未确认',
                 limitation='本地模式仅做关键词初筛；不判断完整合规，不核实补充资料。' if mode == 'local' else 'AI 仅做第一轮审核；未独立验证资料真实性。上传材料经过视觉模型识别，文字与视觉判断仍需人工核对。',

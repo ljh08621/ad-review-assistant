@@ -17,7 +17,7 @@ function setBusy(value){busy=value;document.querySelectorAll('.input-panel input
 function requestHeaders(json=false){const h={'X-Access-Code':$('access').value};if(json)h['Content-Type']='application/json';return h}
 async function responseData(res){let data;try{data=await res.json()}catch{throw new Error('服务返回异常或超时，请稍后重试。')}if(!res.ok)throw new Error(data.error||'处理失败');return data}
 function groupedFindings(r){
-const groups=new Map();for(const [i,f] of r.findings.entries()){const key=f.quote?JSON.stringify([f.quote,f.location]):`missing-${i}`;if(!groups.has(key))groups.set(key,{quote:f.quote,location:f.location,items:[]});groups.get(key).items.push(f)}
+const groups=new Map();for(const [i,f] of r.findings.entries()){const key=f.claim_group|| (f.quote?JSON.stringify([f.quote,f.location]):`missing-${i}`);if(!groups.has(key))groups.set(key,{quote:f.claim_quote||f.quote,location:f.location,items:[]});groups.get(key).items.push(f)}
 return [...groups.values()].map(g=>({...g,risky:g.items.some(f=>f.status==='疑似风险'),high:g.items.some(f=>f.status==='疑似风险'&&f.level==='高'),gap:g.items.some(f=>f.status==='证据不足')})).sort((a,b)=>Number(b.high)-Number(a.high)||Number(b.risky)-Number(a.risky));
 }
 function groupLabel(g){return g.risky?(g.high?'疑似风险 · 优先处理':'疑似风险 · 需要修改'):'证据待核实'}

@@ -89,7 +89,7 @@ def assign_claim_groups(items, text):
         items[index]['claim_quote']=text[group[0]:group[1]]
 
 
-def check_ai_payload(payload, text):
+def check_ai_payload(payload, text, allow_unverified_quote=False):
     checks = payload.get('checks') if isinstance(payload, dict) else None
     if not isinstance(checks, list) or len(checks) != 10:
         raise ValueError('AI 返回不完整：必须包含十条规则。')
@@ -105,7 +105,14 @@ def check_ai_payload(payload, text):
         for field in ('quote', 'reason', 'suggestion'):
             if not isinstance(row.get(field), str) or len(row[field]) > 5000:
                 raise ValueError('AI 字段格式无效。')
-        row['quote'] = restore_quote(row['quote'], text)
+        try:
+            row['quote'] = restore_quote(row['quote'], text)
+        except ValueError:
+            if not allow_unverified_quote:
+                raise
+            row['quote'] = ''
+            row['quote_unverified'] = True
+            row['reason'] = 'AI 引用未能与原文唯一对应，原判断仅供人工核对。' + row['reason']
         if not row['reason'].strip():
             raise ValueError('AI 缺少判断依据。')
         issues = row.get('issues')
@@ -120,15 +127,27 @@ def check_ai_payload(payload, text):
                 raise ValueError('AI 子问题状态无效。')
             if any(not isinstance(issue.get(k),str) or len(issue[k])>5000 for k in ('quote','reason','suggestion')):
                 raise ValueError('AI 子问题字段无效。')
-            issue['quote'] = restore_quote(issue['quote'], text)
+            try:
+                issue['quote'] = restore_quote(issue['quote'], text)
+            except ValueError:
+                if not allow_unverified_quote:
+                    raise
+                issue['quote'] = ''
+                issue['quote_unverified'] = True
+                issue['status'] = '证据不足'
+                issue['reason'] = 'AI 引用未能与原文唯一对应，请对照原图和识别文字核对。' + issue['reason']
             if not issue['reason'].strip():
                 raise ValueError('AI 子问题缺少判断依据。')
             missing = issue.get('missing_evidence', [])
             if not isinstance(missing,list) or len(missing)>20 or any(not isinstance(x,str) or len(x)>1000 for x in missing):
                 raise ValueError('AI 待补充证据格式无效。')
+            if issue.get('quote_unverified'):
+                issue['status'] = '证据不足'
             item = finding(known[rid], issue['quote'], issue['reason'], issue['status'])
             item['suggestion'] = issue['suggestion'] or known[rid]['advice']
             item['missing_evidence'] = missing
+            if issue.get('quote_unverified'):
+                item['quote_unverified'] = True
             findings.append(item)
     return checks, findings
 
@@ -144,7 +163,7 @@ def ai_review(text, evidence, complete, config):
     payload = call_json([
         dict(role='system', content=system),
         dict(role='user', content=json.dumps(dict(advertisement=text, supplemental_material=evidence,
-            user_confirms_complete=complete, review_date=datetime.now(timezone.utc).isoformat(),
+            materials_assumed_complete=complete, review_date=datetime.now(timezone.utc).isoformat(),
             visual_observations=config.get('_visual_context', [])), ensure_ascii=False))
     ], config)
     scope = payload.get('scope') if isinstance(payload, dict) else None
@@ -155,7 +174,7 @@ def ai_review(text, evidence, complete, config):
             raise ValueError('范围判断与审核结果冲突，请重试。')
         checks, items = ScopedChecks(), []
     else:
-        rows, items = check_ai_payload(payload, text)
+        rows, items = check_ai_payload(payload, text, allow_unverified_quote=bool(config.get('_visual_context')))
         checks = ScopedChecks(rows)
     checks.scope = scope
     return checks, items
@@ -172,7 +191,7 @@ def review(data, config=None):
         checks, items = ai_review(text, evidence, complete, config or {})
         scope = getattr(checks, 'scope', {'status':'in_scope','reason':'按宣传材料审核'})
         if scope['status'] != 'in_scope':
-            return dict(rule_version=RULEBOOK['version'],prompt_version='audit-v3.9',mode=mode,
+            return dict(rule_version=RULEBOOK['version'],prompt_version='audit-v3.10',mode=mode,
                         created_at=datetime.now(timezone.utc).isoformat(),scope=scope,
                         conclusion='本次材料不适用于广告审核' if scope['status']=='out_of_scope' else '暂无法确定材料是否属于广告宣传',
                         blocked=False,human_review=True,findings=[],checks=[],
@@ -197,12 +216,13 @@ def review(data, config=None):
     assign_claim_groups(items, text)
     for item in items:
         pos = text.find(item['quote']) if item['quote'] else -1
-        item['location'] = f'第 {text[:pos].count(chr(10)) + 1} 行，字符 {pos + 1} 起' if pos >= 0 else '整体材料／缺失信息'
+        item['location'] = f'第 {text[:pos].count(chr(10)) + 1} 行，字符 {pos + 1} 起' if pos >= 0 else 'AI 引用待核对，请对照原图与识别文字' if item.get('quote_unverified') else '整体材料／缺失信息'
+    quote_unverified = any(item.get('quote_unverified') for item in items) or any(check.get('quote_unverified') for check in checks)
     blocked = any(x['rule_id'] == 'A-06' for x in items)
-    conclusion = '必须人工复核，暂缓发布' if blocked else '发现疑似风险或证据缺口' if items else '本地未命中，无法完整判断' if mode == 'local' else 'AI 初筛未发现风险，待人工确认'
-    return dict(rule_version=RULEBOOK['version'], prompt_version='audit-v3.9', mode=mode, created_at=datetime.now(timezone.utc).isoformat(),
+    conclusion = '必须人工复核，暂缓发布' if blocked else '引用待核对，暂不形成完整结论' if quote_unverified else '发现疑似风险或证据缺口' if items else '本地未命中，无法完整判断' if mode == 'local' else 'AI 初筛未发现风险，待人工确认'
+    return dict(rule_version=RULEBOOK['version'], prompt_version='audit-v3.10', mode=mode, created_at=datetime.now(timezone.utc).isoformat(),
                 conclusion=conclusion, blocked=blocked, human_review=True,
-                completeness='用户声明材料完整，未经独立验证' if complete else '材料完整性未确认',
+                completeness='按本次提交材料处理，完整性未经独立验证' if complete else '材料完整性未确认',
                 limitation='本地模式仅做关键词初筛；不判断完整合规，不核实补充资料。' if mode == 'local' else 'AI 仅做第一轮审核；未独立验证资料真实性。上传材料经过视觉模型识别，文字与视觉判断仍需人工核对。',
-                notices=[] if complete else ['尚未确认材料完整性；请确认已提交全部待发布内容。此提醒不代表已发现缺页。'],
+                notices=(['部分 AI 引用无法与原文唯一对应；相关判断已标为证据不足，请人工对照原图和识别文字。'] if quote_unverified else []) + ([] if complete else ['尚未确认材料完整性；请确认已提交全部待发布内容。此提醒不代表已发现缺页。']),
                 findings=items, checks=checks)

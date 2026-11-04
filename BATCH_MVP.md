@@ -8,9 +8,9 @@
 
 ## 已实现的 MVP
 
-1. `/batches` 工作台：Excel提交、批次列表、逐条进度、报告查看、失败重试。
-2. `POST /api/batches`：上游系统按 JSON 提交最多100条纯文字素材。`POST /api/batches/excel`：提交最多20 MB、100条图文素材的 Excel。
-3. SQLite 保存队列、任务状态与结果，后台线程处理；重启后将未完成任务重新排队。默认两个后台工人，与单条审核共用两个模型调用并发名额。
+1. 首页 `/` 是唯一工作台；`/batches` 是兼容地址。Excel 导入与手动补录共用批次列表、逐条进度、报告查看和失败重试。
+2. `POST /api/batches`：上游系统按 JSON 提交最多100条纯文字素材。`POST /api/batches/excel`：提交最多20 MB、100条图文素材的 Excel。`POST /api/batches/manual`：补录一条文案及最多4个图片/PDF文件。
+3. SQLite 保存队列、任务状态与结果，后台线程处理；重启后将未完成任务重新排队。默认两个后台工人，模型调用并发上限为两个。
 4. 同一批中完全相同的图片组合可复用 OCR 结果。成功任务移除输入中的图片数据；批次数据默认保留24小时。
 5. 每条失败独立记录和重试。报告继续保留原有十条规则、引用位置及人工复核提醒。
 6. 演示站默认最多同时排队或处理100条、每天新提交200条，控制模型调用费用；这是试用阈值，不是企业吞吐目标。
@@ -34,7 +34,7 @@
 
 返回 HTTP 202 与 `batch_id`。后续通过 `GET /api/batches/<batch_id>` 查询进度，通过 `GET /api/batches/<batch_id>/items/<job_id>` 查看完整报告。失败条目可调用 `POST /api/batches/<batch_id>/items/<job_id>/retry`。批次读取与重试都需同一访问码。`mode=local` 仅做关键词初筛，不能作为完整审核结果。
 
-Excel入口使用 `multipart/form-data`，字段为 `file`、`client`、`campaign`、`channel`、`consent=true`；工作表沿用现有“文本/图片”两列表头，插入图片须锚定对应行的B列。整个工作簿有无效行时拒绝提交，避免部分素材悄然漏审。原首页的浏览器内10条批量模式仍可用于快速试用，服务端工作台是持续处理批次的入口。
+Excel入口使用 `multipart/form-data`，字段为 `file`、`client`、`campaign`、`channel`、`consent=true`；工作表沿用现有“文本/图片”两列表头，插入图片须锚定对应行的B列。整个工作簿有无效行时拒绝提交，避免部分素材悄然漏审。手动补录同样使用 `multipart/form-data`，字段为 `text`、`evidence`、`files`、`complete` 及上述客户、活动、渠道、同意字段；审核任务进入同一服务端队列。
 
 ## 演示顺序
 

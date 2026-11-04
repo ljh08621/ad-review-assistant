@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import hmac
 import json
@@ -67,7 +68,7 @@ def headers(response):
 
 @app.get('/')
 def index():
-    return Response((ROOT/'index.html').read_text(encoding='utf-8'),content_type='text/html; charset=utf-8')
+    return Response((ROOT/'batches.html').read_text(encoding='utf-8'),content_type='text/html; charset=utf-8')
 
 
 @app.get('/batches')
@@ -123,6 +124,41 @@ def create_excel_batch():
     batch_id = batch_store.create(request.form.get('client'), request.form.get('campaign'), request.form.get('channel'), items)
     batch_runner.notify()
     return jsonify(batch_id=batch_id, total=len(items), status='queued'), 202
+
+
+@app.post('/api/batches/manual')
+def create_manual_batch():
+    if request.form.get('consent') != 'true':
+        raise ValueError('请确认允许将本条材料发送至配置的 AI 服务。')
+    text = request.form.get('text', '')
+    evidence = request.form.get('evidence', '')
+    files = [file for file in request.files.getlist('files') if file.filename]
+    if not isinstance(text, str) or len(text) > 20000 or len(evidence) > 20000:
+        raise ValueError('文案或补充资料不能超过20000字。')
+    if not text.strip() and not files:
+        raise ValueError('请填写文案或上传图片、PDF。')
+    if len(files) > 4:
+        raise ValueError('每条素材最多上传4个文件。')
+    types = {'.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+             '.webp': 'image/webp', '.pdf': 'application/pdf'}
+    images = []
+    total_bytes = 0
+    for file in files:
+        suffix = Path(file.filename).suffix.lower()
+        if suffix not in types:
+            raise ValueError('仅支持 PNG、JPG、WEBP 图片或 PDF。')
+        raw = file.read(MAX_BYTES + 1)
+        total_bytes += len(raw)
+        if total_bytes > MAX_BYTES:
+            raise ValueError('同组文件合计不能超过8 MB。')
+        images.append(dict(filename=Path(file.filename).name,
+                           image=f"data:{types[suffix]};base64,{base64.b64encode(raw).decode('ascii')}"))
+    item = dict(external_id='手动补录-1', text=text, evidence=evidence,
+                images=images, complete=request.form.get('complete') == 'true', mode='ai')
+    batch_id = batch_store.create(request.form.get('client'), request.form.get('campaign'),
+                                  request.form.get('channel'), [item])
+    batch_runner.notify()
+    return jsonify(batch_id=batch_id, total=1, status='queued'), 202
 
 
 @app.get('/api/batches/<batch_id>')

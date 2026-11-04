@@ -1,6 +1,7 @@
 """Small, persistent batch queue for the interview demo's single server process."""
 
 import base64
+import binascii
 import hashlib
 import json
 import secrets
@@ -50,6 +51,21 @@ class BatchStore:
                     batch_id TEXT NOT NULL, digest TEXT NOT NULL, material TEXT NOT NULL,
                     PRIMARY KEY(batch_id,digest)
                 );
+                CREATE TABLE IF NOT EXISTS source_assets (
+                    job_id TEXT NOT NULL, position INTEGER NOT NULL,
+                    filename TEXT NOT NULL, mime TEXT NOT NULL, content BLOB NOT NULL,
+                    PRIMARY KEY(job_id,position)
+                );
+                CREATE TABLE IF NOT EXISTS review_decisions (
+                    job_id TEXT PRIMARY KEY, decision TEXT NOT NULL, reviewer TEXT NOT NULL,
+                    reason TEXT NOT NULL, decided_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS review_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, job_id TEXT NOT NULL,
+                    decision TEXT NOT NULL, reviewer TEXT NOT NULL,
+                    reason TEXT NOT NULL, decided_at TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS review_events_job ON review_events(job_id,id);
             """)
             # A restart cannot know whether a previous model call completed.
             db.execute("UPDATE jobs SET status='queued', error='服务重启，已重新排队' WHERE status='running'")
@@ -72,6 +88,9 @@ class BatchStore:
     def purge_expired(self):
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=RETENTION_HOURS)).isoformat()
         with self.connect() as db:
+            db.execute("DELETE FROM source_assets WHERE job_id IN (SELECT jobs.id FROM jobs JOIN batches ON jobs.batch_id=batches.id WHERE batches.created_at < ?)", (cutoff,))
+            db.execute("DELETE FROM review_events WHERE job_id IN (SELECT jobs.id FROM jobs JOIN batches ON jobs.batch_id=batches.id WHERE batches.created_at < ?)", (cutoff,))
+            db.execute("DELETE FROM review_decisions WHERE job_id IN (SELECT jobs.id FROM jobs JOIN batches ON jobs.batch_id=batches.id WHERE batches.created_at < ?)", (cutoff,))
             db.execute("DELETE FROM ocr_cache WHERE batch_id IN (SELECT id FROM batches WHERE created_at < ?)", (cutoff,))
             db.execute("DELETE FROM jobs WHERE batch_id IN (SELECT id FROM batches WHERE created_at < ?)", (cutoff,))
             db.execute("DELETE FROM batches WHERE created_at < ?", (cutoff,))
@@ -108,9 +127,26 @@ class BatchStore:
                 raise ValueError("每条素材需有文案或1～4张图片。")
             if item.get("mode", "ai") not in ("ai", "local") or type(item.get("complete", False)) is not bool:
                 raise ValueError("审核方式或材料完整性格式无效。")
+            assets = []
+            total_bytes = 0
+            for image in images:
+                if not isinstance(image, dict) or not isinstance(image.get('filename'), str) or not isinstance(image.get('image'), str):
+                    raise ValueError("图片材料格式无效。")
+                try:
+                    header, encoded = image['image'].split(',', 1)
+                    mime = header.removeprefix('data:').removesuffix(';base64')
+                    if header != f'data:{mime};base64' or mime not in ('image/png', 'image/jpeg', 'image/webp', 'application/pdf'):
+                        raise ValueError()
+                    raw = base64.b64decode(encoded, validate=True)
+                except (ValueError, binascii.Error):
+                    raise ValueError("图片材料编码无效。")
+                total_bytes += len(raw)
+                if not raw or total_bytes > 8 * 1024 * 1024:
+                    raise ValueError("单条图片材料合计不能超过8 MB。")
+                assets.append((image['filename'][:200], mime, raw))
             seen.add(external_id)
             prepared.append((external_id, dict(text=text, evidence=evidence, images=images,
-                                               complete=item.get("complete", False), mode=item.get("mode", "ai"))))
+                                               complete=item.get("complete", False), mode=item.get("mode", "ai")), assets))
         batch_id = secrets.token_urlsafe(16)
         now = utc_now()
         with self.connect() as db:
@@ -123,9 +159,13 @@ class BatchStore:
             if submitted + len(items) > MAX_DAILY_ITEMS:
                 raise ValueError(f"演示站每天最多提交{MAX_DAILY_ITEMS}条素材，请明天再试。")
             db.execute("INSERT INTO batches VALUES (?,?,?,?,?)", (batch_id, client.strip(), campaign.strip(), channel.strip(), now))
-            db.executemany("INSERT INTO jobs (id,batch_id,external_id,position,payload,status,updated_at) VALUES (?,?,?,?,?,'queued',?)",
-                           [(secrets.token_urlsafe(16), batch_id, ext, pos, json.dumps(payload, ensure_ascii=False), now)
-                            for pos, (ext, payload) in enumerate(prepared, 1)])
+            for pos, (ext, payload, assets) in enumerate(prepared, 1):
+                job_id = secrets.token_urlsafe(16)
+                db.execute("INSERT INTO jobs (id,batch_id,external_id,position,payload,status,updated_at) VALUES (?,?,?,?,?,'queued',?)",
+                           (job_id, batch_id, ext, pos, json.dumps(payload, ensure_ascii=False), now))
+                db.executemany("INSERT INTO source_assets VALUES (?,?,?,?,?)",
+                               [(job_id, source_pos, filename, mime, raw)
+                                for source_pos, (filename, mime, raw) in enumerate(assets, 1)])
         return batch_id
 
     def claim(self):
@@ -168,7 +208,7 @@ class BatchStore:
             batch = db.execute("SELECT * FROM batches WHERE id=?", (batch_id,)).fetchone()
             if batch is None:
                 return None
-            jobs = db.execute("SELECT id,external_id,position,status,error,attempts,updated_at FROM jobs WHERE batch_id=? ORDER BY position", (batch_id,)).fetchall()
+            jobs = db.execute("SELECT jobs.id,external_id,position,status,error,attempts,updated_at,COALESCE(review_decisions.decision,'pending') AS decision FROM jobs LEFT JOIN review_decisions ON review_decisions.job_id=jobs.id WHERE batch_id=? ORDER BY position", (batch_id,)).fetchall()
         rows = [dict(row) for row in jobs]
         counts = {state: sum(row["status"] == state for row in rows) for state in ("queued", "running", "succeeded", "failed")}
         return dict(batch=dict(batch), counts=counts, total=len(rows), items=rows)
@@ -181,13 +221,87 @@ class BatchStore:
 
     def detail(self, batch_id, job_id):
         with self.connect() as db:
-            row = db.execute("SELECT id,external_id,position,status,report,error,attempts,updated_at FROM jobs WHERE id=? AND batch_id=?",
+            row = db.execute("SELECT id,external_id,position,status,payload,report,error,attempts,updated_at FROM jobs WHERE id=? AND batch_id=?",
                              (job_id, batch_id)).fetchone()
+            assets = db.execute("SELECT position,filename,mime FROM source_assets WHERE job_id=? ORDER BY position", (job_id,)).fetchall()
+            decision = db.execute("SELECT decision,reviewer,reason,decided_at FROM review_decisions WHERE job_id=?", (job_id,)).fetchone()
+            history = db.execute("SELECT decision,reviewer,reason,decided_at FROM review_events WHERE job_id=? ORDER BY id DESC LIMIT 20", (job_id,)).fetchall()
         if row is None:
             return None
         item = dict(row)
         item["report"] = json.loads(item["report"]) if item["report"] else None
+        payload = json.loads(item.pop('payload'))
+        item['source'] = dict(text=payload.get('text', ''), evidence=payload.get('evidence', ''),
+                              complete=payload.get('complete', False), assets=[dict(asset) for asset in assets])
+        item['decision'] = dict(decision) if decision else None
+        item['review_history'] = [dict(event) for event in history]
         return item
+
+    def asset(self, batch_id, job_id, position):
+        with self.connect() as db:
+            row = db.execute("SELECT source_assets.filename,source_assets.mime,source_assets.content FROM source_assets JOIN jobs ON jobs.id=source_assets.job_id WHERE jobs.batch_id=? AND jobs.id=? AND source_assets.position=?",
+                             (batch_id, job_id, position)).fetchone()
+        return dict(row) if row else None
+
+    def list_queue(self, search='', machine='all', decision='all', risk='all', limit=100):
+        if len(search) > 100 or machine not in ('all','queued','running','succeeded','failed') or decision not in ('all','pending','approved','changes_requested','evidence_requested') or risk not in ('all','high','medium','low','none','unavailable'):
+            raise ValueError('队列筛选条件无效。')
+        self.purge_expired()
+        with self.connect() as db:
+            rows = db.execute("SELECT jobs.id AS job_id,jobs.batch_id,jobs.external_id,jobs.status,jobs.error,jobs.updated_at,json_extract(jobs.payload,'$.text') AS source_text,json_extract(jobs.payload,'$.mode') AS mode,jobs.report,batches.client,batches.campaign,batches.channel,batches.created_at,COALESCE(review_decisions.decision,'pending') AS decision FROM jobs JOIN batches ON batches.id=jobs.batch_id LEFT JOIN review_decisions ON review_decisions.job_id=jobs.id ORDER BY batches.created_at DESC,jobs.position DESC LIMIT 500").fetchall()
+        output = []
+        needle = search.strip().casefold()
+        for row in rows:
+            item = dict(row)
+            if machine != 'all' and item['status'] != machine or decision != 'all' and item['decision'] != decision:
+                continue
+            if needle and not any(needle in str(item[key]).casefold() for key in ('client','campaign','channel','external_id')):
+                continue
+            report = json.loads(item.pop('report')) if item['report'] else None
+            item['text_preview'] = (item.pop('source_text') or '')[:100]
+            item['mode'] = item['mode'] or 'ai'
+            item['conclusion'] = report.get('conclusion','') if report else ''
+            item['risk'] = report_risk(report)
+            if risk != 'all' and item['risk'] != risk:
+                continue
+            output.append(item)
+        priority = {'high':0,'medium':1,'low':2,'none':3,'unavailable':4}
+        output.sort(key=lambda item: (item['decision'] != 'pending', priority[item['risk']], item['created_at']), reverse=False)
+        return output[:limit]
+
+    def record_decision(self, batch_id, job_id, decision, reviewer, reason):
+        if decision not in ('approved','changes_requested','evidence_requested'):
+            raise ValueError('人工结论无效。')
+        if not isinstance(reviewer,str) or not 2 <= len(reviewer.strip()) <= 60:
+            raise ValueError('请填写2～60字的审核人名称。')
+        if not isinstance(reason,str) or not 3 <= len(reason.strip()) <= 1000:
+            raise ValueError('请填写3～1000字的处理依据。')
+        now = utc_now()
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT status FROM jobs WHERE id=? AND batch_id=?', (job_id,batch_id)).fetchone()
+            if row is None:
+                return False
+            if row['status'] != 'succeeded':
+                raise ValueError('仅已完成机器初筛的素材可以记录人工结论。')
+            db.execute('INSERT INTO review_decisions(job_id,decision,reviewer,reason,decided_at) VALUES (?,?,?,?,?) ON CONFLICT(job_id) DO UPDATE SET decision=excluded.decision,reviewer=excluded.reviewer,reason=excluded.reason,decided_at=excluded.decided_at',
+                       (job_id,decision,reviewer.strip(),reason.strip(),now))
+            db.execute('INSERT INTO review_events(job_id,decision,reviewer,reason,decided_at) VALUES (?,?,?,?,?)',
+                       (job_id,decision,reviewer.strip(),reason.strip(),now))
+        return True
+
+
+def report_risk(report):
+    if report is None:
+        return 'unavailable'
+    findings = report.get('findings', [])
+    if report.get('blocked') or any(item.get('level') == '高' for item in findings):
+        return 'high'
+    if any(item.get('status') in ('疑似风险','证据不足') for item in findings):
+        return 'medium'
+    if findings:
+        return 'low'
+    return 'none'
 
 
 def process_item(payload, configuration, store=None, batch_id=None):

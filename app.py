@@ -62,7 +62,7 @@ def protect():
 def headers(response):
     response.headers['Cache-Control']='no-store'
     response.headers['X-Content-Type-Options']='nosniff'
-    response.headers['Content-Security-Policy']="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; frame-ancestors 'none'; connect-src 'self'"
+    response.headers['Content-Security-Policy']="default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; frame-src blob:; frame-ancestors 'none'; connect-src 'self'"
     return response
 
 
@@ -91,6 +91,14 @@ def status():
 def list_batches():
     batch_runner.start()
     return jsonify(batches=batch_store.list_recent())
+
+
+@app.get('/api/batches/queue')
+def review_queue():
+    batch_runner.start()
+    return jsonify(items=batch_store.list_queue(search=request.args.get('search',''),
+        machine=request.args.get('machine','all'), decision=request.args.get('decision','all'),
+        risk=request.args.get('risk','all')))
 
 
 @app.post('/api/batches')
@@ -172,6 +180,24 @@ def get_batch(batch_id):
 def get_batch_item(batch_id, job_id):
     result = batch_store.detail(batch_id, job_id)
     return jsonify(result) if result else (jsonify(error='素材不存在或已过期。'),404)
+
+
+@app.get('/api/batches/<batch_id>/items/<job_id>/assets/<int:position>')
+def get_batch_asset(batch_id, job_id, position):
+    asset = batch_store.asset(batch_id, job_id, position)
+    return Response(asset['content'], mimetype=asset['mime']) if asset else (jsonify(error='原始文件不存在或已过期。'),404)
+
+
+@app.post('/api/batches/<batch_id>/items/<job_id>/decision')
+def set_batch_decision(batch_id, job_id):
+    if not request.is_json:
+        return jsonify(error='请求必须使用 JSON。'),415
+    data = request.get_json()
+    if not isinstance(data,dict):
+        raise ValueError('请求格式错误。')
+    if not batch_store.record_decision(batch_id, job_id, data.get('decision'), data.get('reviewer'), data.get('reason')):
+        return jsonify(error='素材不存在或已过期。'),404
+    return jsonify(item=batch_store.detail(batch_id, job_id))
 
 
 @app.post('/api/batches/<batch_id>/items/<job_id>/retry')

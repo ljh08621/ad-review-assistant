@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>批量审核工作台</title>
+<style>
+:root{font:15px/1.5 system-ui,-apple-system,"Microsoft YaHei",sans-serif;color:#172b37;background:#f3f6f8}
+*{box-sizing:border-box}body{margin:0}header{background:#173943;color:white;padding:18px max(20px,calc((100vw - 1180px)/2));display:flex;justify-content:space-between;align-items:center;gap:16px}header strong{font-size:20px}header a{color:#e3f6f5;text-decoration:none}
+main{max-width:1180px;margin:28px auto;padding:0 20px}h1{font-size:28px;margin:0 0 4px}h2{font-size:19px;margin:0 0 16px}.sub{color:#5b6d78;margin:0 0 24px}.grid{display:grid;grid-template-columns:360px 1fr;gap:18px}.card{background:#fff;border:1px solid #dce5e8;border-radius:14px;padding:22px;box-shadow:0 3px 16px #1635410b}.card+.card{margin-top:18px}label{display:block;font-weight:600;margin:12px 0 5px}input,select{font:inherit;width:100%;padding:10px 12px;border:1px solid #b8cbd0;border-radius:8px;background:#fff}input[type=checkbox]{width:auto;margin-right:7px}button{font:inherit;cursor:pointer;border:1px solid #9bb9bc;border-radius:8px;padding:9px 15px;background:white;color:#173943}button.primary{background:#087c79;color:#fff;border-color:#087c79;width:100%;margin-top:14px;font-weight:700}button:disabled{opacity:.55;cursor:wait}.hint{color:#61727b;font-size:13px}.check{font-weight:400;display:flex;align-items:flex-start}.row{display:flex;justify-content:space-between;gap:12px;align-items:center}.row h2{margin:0}.error{color:#a3272d;background:#fff0f0;padding:9px;border-radius:7px}.ok{color:#14675e}.pill{display:inline-block;border-radius:30px;background:#e7f1f1;padding:3px 9px;font-size:12px}.failed{color:#b02832}.succeeded{color:#147267}.running{color:#a15c08}.bar{height:8px;background:#e4ebed;border-radius:8px;overflow:hidden;margin:10px 0}.bar i{display:block;height:100%;background:#0a8b84}.batch,.job{border:1px solid #e0e9ec;border-radius:9px;padding:12px;margin-top:10px;cursor:pointer}.batch:hover,.job:hover{border-color:#168783}.job{display:grid;grid-template-columns:1fr auto;align-items:center;gap:8px}.muted{color:#697a83}#report article{border-top:1px solid #e0e9ec;padding:12px 0}#report q{font-weight:600}#report p{margin:5px 0}#report .empty{padding:28px;text-align:center;color:#6f7d83}@media(max-width:850px){.grid{grid-template-columns:1fr}header{padding:16px 20px}}
+</style>
+</head>
+<body>
+<header><strong>批量审核工作台</strong><a href="/">返回单条审核</a></header>
+<main>
+<h1>投放前批次检查</h1><p class="sub">按客户、活动和渠道管理素材。后台继续处理已提交的批次；审核结论仍需人工确认。</p>
+<div class="grid"><div>
+<section class="card"><h2>提交一批素材</h2>
+<label for="access">试用访问码</label><input id="access" type="password" autocomplete="off">
+<label for="client">客户</label><input id="client" maxlength="100" placeholder="例如：某消费品牌">
+<label for="campaign">活动</label><input id="campaign" maxlength="100" placeholder="例如：双十一新品推广">
+<label for="channel">投放渠道</label><input id="channel" maxlength="100" placeholder="例如：国内信息流">
+<label for="file">素材 Excel</label><input id="file" type="file" accept=".xlsx">
+<p class="hint">每行一条素材，支持文案和插入图片；每批最多100条，文件20 MB以内。图片左上角置于B列对应行。</p>
+<a href="/api/excel-template" download>下载现有 Excel 模板</a>
+<label class="check"><input id="consent" type="checkbox">允许将本批材料发送至配置的 AI 服务</label>
+<button class="primary" id="submit">提交后台审核</button><p id="submitStatus" role="status"></p>
+</section>
+<section class="card"><h2>模拟系统接入</h2><p class="hint">创建5条纯文字本地规则样例，体验服务端排队和进度查询；此样例不调用 AI，不代表完整审核效果。</p><button id="demo">生成示例批次</button></section>
+</div><div>
+<section class="card"><div class="row"><h2>近期批次</h2><button id="refresh">刷新</button></div><div id="batches" class="muted">输入访问码后刷新。</div></section>
+<section class="card"><h2 id="batchTitle">批次详情</h2><div id="items" class="muted">选择一批素材查看逐条状态。</div></section>
+<section class="card"><h2>审核结果</h2><div id="report" class="muted">选择一条已完成的素材。</div></section>
+</div></div>
+</main>
+<script>
+const $=id=>document.getElementById(id);let selectedBatch=null;let busy=false;
+function el(tag,text,cls){const node=document.createElement(tag);if(text!==undefined)node.textContent=text;if(cls)node.className=cls;return node}
+function code(){return $('access').value}
+async function api(path,options={}){const headers={...(options.headers||{}),'X-Access-Code':code()};const response=await fetch(path,{...options,headers});let data;try{data=await response.json()}catch{throw new Error('服务返回异常，请稍后重试。')}if(!response.ok)throw new Error(data.error||'请求失败');return data}
+function date(value){return new Date(value).toLocaleString()}
+function clear(node){node.replaceChildren()}
+function showError(message){$('submitStatus').className='error';$('submitStatus').textContent=message}
+function showSuccess(message){$('submitStatus').className='ok';$('submitStatus').textContent=message}
+function statusLabel(status){return {queued:'等待处理',running:'处理中',succeeded:'已完成',failed:'失败'}[status]||status}
+async function loadBatches(){try{const data=await api('/api/batches');const root=$('batches');clear(root);if(!data.batches.length){root.append(el('p','暂无批次。'));return}for(const batch of data.batches){const b=batch.batch,c=batch.counts,done=c.succeeded+c.failed;const card=el('div',undefined,'batch');card.append(el('strong',`${b.client} · ${b.campaign}`),el('div',`${b.channel} · ${date(b.created_at)}`,'muted'));const bar=el('div',undefined,'bar');const fill=el('i');fill.style.width=`${Math.round(done/batch.total*100)}%`;bar.append(fill);card.append(bar,el('div',`完成 ${c.succeeded} / ${batch.total} · 失败 ${c.failed} · 处理中 ${c.running}`,'hint'));card.onclick=()=>selectBatch(b.id);root.append(card)}}catch(e){showError(e.message)}}
+async function selectBatch(id){selectedBatch=id;try{const data=await api(`/api/batches/${encodeURIComponent(id)}`);$('batchTitle').textContent=`${data.batch.client} · ${data.batch.campaign}`;const root=$('items');clear(root);for(const job of data.items){const card=el('div',undefined,'job');const left=el('div');left.append(el('strong',`素材 ${job.external_id}`),el('div',statusLabel(job.status),job.status));if(job.error)left.append(el('div',job.error,'failed'));card.append(left);const actions=el('div');if(job.status==='succeeded'){const view=el('button','查看结果');view.onclick=event=>{event.stopPropagation();viewJob(id,job.id)};actions.append(view)}if(job.status==='failed'){const retry=el('button','重试');retry.onclick=async event=>{event.stopPropagation();retry.disabled=true;try{await api(`/api/batches/${encodeURIComponent(id)}/items/${encodeURIComponent(job.id)}/retry`,{method:'POST'});await selectBatch(id)}catch(e){showError(e.message);retry.disabled=false}};actions.append(retry)}card.append(actions);root.append(card)}}catch(e){showError(e.message)}}
+async function viewJob(batchId,jobId){try{const job=await api(`/api/batches/${encodeURIComponent(batchId)}/items/${encodeURIComponent(jobId)}`);const root=$('report');clear(root);if(!job.report){root.append(el('p','此条尚无完整审核结果。'));return}const r=job.report;root.append(el('h3',r.conclusion),el('p',`规则版本 ${r.rule_version} · 检查时间 ${date(r.created_at)}`,'hint'));if(!r.findings.length)root.append(el('p','本次没有生成具体问题，仍需人工确认。'));for(const f of r.findings){const card=el('article');card.append(el('strong',`${f.rule_id} · ${f.risk_type} · ${f.status}`),el('p',f.quote||'整体材料／缺失信息'),el('p',f.location||'' ,'hint'),el('p',`判断：${f.reason}`),el('p',`建议：${f.suggestion}`));root.append(card)}if(r.notices?.length)for(const notice of r.notices)root.append(el('p',notice,'hint'))}catch(e){showError(e.message)}}
+$('submit').onclick=async()=>{if(busy)return;const file=$('file').files[0];if(!file)return showError('请选择 Excel 文件。');if(file.size>20*1024*1024)return showError('Excel 不能超过20 MB。');if(!$('consent').checked)return showError('请先确认材料处理方式。');busy=true;$('submit').disabled=true;try{const form=new FormData();for(const id of ['client','campaign','channel'])form.append(id,$(id).value);form.append('complete','false');form.append('consent','true');form.append('file',file);const result=await api('/api/batches/excel',{method:'POST',body:form});showSuccess(`已提交 ${result.total} 条素材。批次编号：${result.batch_id}`);await loadBatches();await selectBatch(result.batch_id)}catch(e){showError(e.message)}finally{busy=false;$('submit').disabled=false}};
+$('demo').onclick=async()=>{if(busy)return;busy=true;$('demo').disabled=true;try{const samples=['本款帆布包售价69元。','限时买一送一，详情以App为准。','本品7天治愈痘痘，无副作用。','全网第一，行业唯一。','本款水杯容量500mL，蓝色。'];const data={client:$('client').value||'演示客户',campaign:$('campaign').value||'示例活动',channel:$('channel').value||'演示渠道',consent:true,items:samples.map((text,i)=>({external_id:`DEMO-${i+1}`,text,mode:'local',complete:true}))};const result=await api('/api/batches',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});showSuccess('本地规则示例批次已提交，不调用 AI。');await loadBatches();await selectBatch(result.batch_id)}catch(e){showError(e.message)}finally{busy=false;$('demo').disabled=false}};
+$('refresh').onclick=async()=>{await loadBatches();if(selectedBatch)await selectBatch(selectedBatch)};
+setInterval(async()=>{if(!selectedBatch)return;await selectBatch(selectedBatch);await loadBatches()},5000);
+</script>
+</body></html>

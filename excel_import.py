@@ -12,7 +12,7 @@ R='http://schemas.openxmlformats.org/officeDocument/2006/relationships'
 D='http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing'
 A='http://schemas.openxmlformats.org/drawingml/2006/main'
 
-def parse_excel(raw):
+def parse_excel(raw, max_rows=10):
     if len(raw)>MAX_EXCEL: raise ValueError('Excel不能超过20 MB。')
     try:
         with zipfile.ZipFile(io.BytesIO(raw)) as z:
@@ -66,7 +66,7 @@ def parse_excel(raw):
                     if rid not in links: raise ValueError('请嵌入图片，不支持外链图片。')
                     pictures.setdefault(row,[]).append(links[rid])
             rows=sorted({int(''.join(filter(str.isdigit,k))) for k in cells if k not in ('A1','B1')}|set(pictures)| (formula_rows-{1}))
-            if not 1<=len(rows)<=10: raise ValueError('每份Excel需包含1～10条素材。')
+            if not 1<=len(rows)<=max_rows: raise ValueError(f'每份Excel需包含1～{max_rows}条素材。')
             output=[]
             for row in rows:
                 text=cells.get(f'A{row}','').strip();errors=[];images=[]

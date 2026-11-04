@@ -14,6 +14,7 @@ from werkzeug.exceptions import HTTPException
 from reviewer import review, RULEBOOK
 from excel_import import parse_excel, MAX_EXCEL
 from materials import extract, extract_bundle, MAX_BYTES
+from batch_jobs import BatchStore, BatchRunner, MAX_BATCH_ITEMS
 
 ROOT = Path(__file__).resolve().parent
 app = Flask(__name__, static_folder=None)
@@ -22,6 +23,8 @@ signer = URLSafeTimedSerializer(os.environ.get('APP_SIGNING_KEY') or secrets.tok
 slots = threading.BoundedSemaphore(2)
 rate_lock = threading.Lock()
 recent_calls = deque()
+batch_store = BatchStore(Path(os.environ.get('AD_REVIEW_DATA_DIR', ROOT/'data'))/'batches.sqlite3')
+batch_runner = BatchRunner(batch_store, configuration=lambda: configuration(), slots=slots)
 
 
 def configuration():
@@ -38,13 +41,14 @@ def configuration():
 
 @app.before_request
 def protect():
-    if request.method != 'POST': return
+    if request.method != 'POST' and not request.path.startswith('/api/batches'): return
     origin = request.headers.get('Origin')
     if origin and origin.rstrip('/') not in (request.host_url.rstrip('/'), 'https://' + request.host):
         return jsonify(error='请从本应用页面发起请求。'), 403
     code = os.environ.get('APP_ACCESS_CODE','')
     if code and not hmac.compare_digest(hashlib.sha256(request.headers.get('X-Access-Code','').encode()).digest(), hashlib.sha256(code.encode()).digest()):
         return jsonify(error='请输入正确的试用访问码。'), 401
+    if request.method != 'POST': return
     now = time.monotonic()
     with rate_lock:
         while recent_calls and now-recent_calls[0]>60: recent_calls.popleft()
@@ -66,6 +70,11 @@ def index():
     return Response((ROOT/'index.html').read_text(encoding='utf-8'),content_type='text/html; charset=utf-8')
 
 
+@app.get('/batches')
+def batches_page():
+    return Response((ROOT/'batches.html').read_text(encoding='utf-8'),content_type='text/html; charset=utf-8')
+
+
 @app.get('/api/rules')
 def rules(): return jsonify(RULEBOOK)
 
@@ -75,6 +84,66 @@ def status():
     cfg = configuration()
     return jsonify(ai_configured=bool(cfg.get('api_key','').strip()),
         vision_model=cfg.get('vision_model','qwen-vl-plus'),access_required=bool(os.environ.get('APP_ACCESS_CODE')))
+
+
+@app.get('/api/batches')
+def list_batches():
+    batch_runner.start()
+    return jsonify(batches=batch_store.list_recent())
+
+
+@app.post('/api/batches')
+def create_batch():
+    if not request.is_json:
+        return jsonify(error='请求必须使用 JSON。'), 415
+    data = request.get_json()
+    if not isinstance(data, dict) or data.get('consent') is not True:
+        raise ValueError('请确认允许将本批材料发送至配置的 AI 服务。')
+    items = data.get('items')
+    if not isinstance(items, list) or any(not isinstance(item,dict) or item.get('images') for item in items):
+        raise ValueError('API 批次仅接受文案；图文批次请使用 Excel 入口。')
+    batch_id = batch_store.create(data.get('client'), data.get('campaign'), data.get('channel'), items)
+    batch_runner.notify()
+    return jsonify(batch_id=batch_id, total=len(items), status='queued'), 202
+
+
+@app.post('/api/batches/excel')
+def create_excel_batch():
+    if request.form.get('consent') != 'true':
+        raise ValueError('请确认允许将本批材料发送至配置的 AI 服务。')
+    file = request.files.get('file')
+    if file is None or not file.filename.lower().endswith('.xlsx'):
+        raise ValueError('请上传.xlsx文件。')
+    rows = parse_excel(file.read(MAX_EXCEL+1), max_rows=MAX_BATCH_ITEMS)
+    invalid = [row['row'] for row in rows if row['errors']]
+    if invalid:
+        raise ValueError('Excel中有无效素材行：'+ '、'.join(map(str,invalid[:20]))+'；请先修正后提交。')
+    items = [dict(external_id=str(row['row']), text=row['text'], images=row['images'],
+                  evidence='', complete=request.form.get('complete')=='true', mode='ai') for row in rows]
+    batch_id = batch_store.create(request.form.get('client'), request.form.get('campaign'), request.form.get('channel'), items)
+    batch_runner.notify()
+    return jsonify(batch_id=batch_id, total=len(items), status='queued'), 202
+
+
+@app.get('/api/batches/<batch_id>')
+def get_batch(batch_id):
+    batch_runner.start()
+    result = batch_store.summary(batch_id)
+    return jsonify(result) if result else (jsonify(error='批次不存在或已过期。'),404)
+
+
+@app.get('/api/batches/<batch_id>/items/<job_id>')
+def get_batch_item(batch_id, job_id):
+    result = batch_store.detail(batch_id, job_id)
+    return jsonify(result) if result else (jsonify(error='素材不存在或已过期。'),404)
+
+
+@app.post('/api/batches/<batch_id>/items/<job_id>/retry')
+def retry_batch_item(batch_id, job_id):
+    if not batch_store.retry(batch_id,job_id):
+        return jsonify(error='仅失败的素材可以重试。'),409
+    batch_runner.notify()
+    return jsonify(status='queued'),202
 
 
 def with_slot(fn):
@@ -182,5 +251,6 @@ if __name__=='__main__':
     host=os.environ.get('HOST','127.0.0.1');port=int(os.environ.get('PORT','8765'))
     if host not in ('127.0.0.1','localhost') and len(os.environ.get('APP_ACCESS_CODE',''))<12:
         raise SystemExit('对外提供服务前，请设置至少12位 APP_ACCESS_CODE 试用访问码。')
+    batch_runner.start()
     print(f'广告审核助手已启动：http://{host}:{port}，按 Ctrl+C 停止。',flush=True)
     serve(app,host=host,port=port,threads=4,max_request_body_size=MAX_EXCEL+102400,channel_timeout=600)

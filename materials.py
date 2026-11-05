@@ -76,6 +76,20 @@ def image_part(png):
     return {'type':'image_url','image_url':{'url':f'data:{mime};base64,'+base64.b64encode(raw).decode()}}
 
 
+def review_image_parts(files):
+    """Build labeled image inputs for a direct visual audit of the same pages OCR saw."""
+    pages = []
+    for filename, raw in files:
+        for source_page, (png, _) in enumerate(images_from_file(filename, raw), 1):
+            pages.append((Path(filename.replace(chr(92), '/')).name[:180], source_page, png))
+    if not 1 <= len(pages) <= MAX_PAGES:
+        raise ValueError('每组材料合计限 1～4 页，请拆分后提交。')
+    content = []
+    for index, (filename, source_page, png) in enumerate(pages, 1):
+        content.extend([{'type':'text','text':f'原始素材 {index}：{filename}，第 {source_page} 页。请直接核对画面、可见文字、价格与限制条件的呈现。'}, image_part(png)])
+    return content
+
+
 def extract_bundle(files, config):
     pages = []
     for filename, raw in files:

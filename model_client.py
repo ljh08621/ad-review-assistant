@@ -20,7 +20,7 @@ def call_json(messages, config, vision=False):
     if not key or key == '在这里填写密钥':
         raise ValueError('尚未配置 API，请在 config.json 中填写百炼密钥。')
     base = normalize_base_url(config.get('base_url', ''))
-    model = config.get('vision_model', 'qwen-vl-plus') if vision else config.get('model', 'qwen-plus')
+    model = config.get('vision_model', 'qwen-vl-plus') if vision else config.get('model', 'qwen-vl-plus')
     body = dict(model=model, messages=messages, response_format={'type':'json_object'}, stream=False, temperature=0)
     if vision and model == 'qwen3.8-flash':
         body['enable_thinking'] = False

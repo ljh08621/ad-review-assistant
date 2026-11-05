@@ -84,6 +84,7 @@ def rules(): return jsonify(RULEBOOK)
 def status():
     cfg = configuration()
     return jsonify(ai_configured=bool(cfg.get('api_key','').strip()),
+        review_model=cfg.get('model','qwen-vl-plus'),
         vision_model=cfg.get('vision_model','qwen-vl-plus'),access_required=bool(os.environ.get('APP_ACCESS_CODE')))
 
 

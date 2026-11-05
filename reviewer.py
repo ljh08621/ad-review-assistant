@@ -160,12 +160,19 @@ def ai_review(text, evidence, complete, config):
     if not base.startswith('https://'):
         raise ValueError('模型服务地址必须使用 https。')
     system = (ROOT / 'audit_prompt.md').read_text(encoding='utf-8') + '\n规则库：' + json.dumps(RULEBOOK, ensure_ascii=False)
+    user_text = json.dumps(dict(advertisement=text, supplemental_material=evidence,
+        materials_assumed_complete=complete, review_date=datetime.now(timezone.utc).isoformat(),
+        visual_observations=config.get('_visual_context', [])), ensure_ascii=False)
+    image_files = config.get('_image_files') or []
+    if image_files:
+        from materials import review_image_parts
+        user_content = [{'type':'text','text':user_text}] + review_image_parts(image_files)
+    else:
+        user_content = user_text
     payload = call_json([
         dict(role='system', content=system),
-        dict(role='user', content=json.dumps(dict(advertisement=text, supplemental_material=evidence,
-            materials_assumed_complete=complete, review_date=datetime.now(timezone.utc).isoformat(),
-            visual_observations=config.get('_visual_context', [])), ensure_ascii=False))
-    ], config)
+        dict(role='user', content=user_content)
+    ], config, vision=bool(image_files))
     scope = payload.get('scope') if isinstance(payload, dict) else None
     if not isinstance(scope,dict) or scope.get('status') not in ('in_scope','out_of_scope','uncertain') or not isinstance(scope.get('reason'),str) or not scope['reason'].strip() or len(scope['reason'])>2000:
         raise ValueError('模型未返回有效的材料适用性判断，请重试。')
@@ -191,7 +198,7 @@ def review(data, config=None):
         checks, items = ai_review(text, evidence, complete, config or {})
         scope = getattr(checks, 'scope', {'status':'in_scope','reason':'按宣传材料审核'})
         if scope['status'] != 'in_scope':
-            return dict(rule_version=RULEBOOK['version'],prompt_version='audit-v3.10',mode=mode,
+            return dict(rule_version=RULEBOOK['version'],prompt_version='audit-v3.11',mode=mode,
                         created_at=datetime.now(timezone.utc).isoformat(),scope=scope,
                         conclusion='本次材料不适用于广告审核' if scope['status']=='out_of_scope' else '暂无法确定材料是否属于广告宣传',
                         blocked=False,human_review=True,findings=[],checks=[],
@@ -220,7 +227,7 @@ def review(data, config=None):
     quote_unverified = any(item.get('quote_unverified') for item in items) or any(check.get('quote_unverified') for check in checks)
     blocked = any(x['rule_id'] == 'A-06' for x in items)
     conclusion = '必须人工复核，暂缓发布' if blocked else '引用待核对，暂不形成完整结论' if quote_unverified else '发现疑似风险或证据缺口' if items else '本地未命中，无法完整判断' if mode == 'local' else 'AI 初筛未发现风险，待人工确认'
-    return dict(rule_version=RULEBOOK['version'], prompt_version='audit-v3.10', mode=mode, created_at=datetime.now(timezone.utc).isoformat(),
+    return dict(rule_version=RULEBOOK['version'], prompt_version='audit-v3.11', mode=mode, created_at=datetime.now(timezone.utc).isoformat(),
                 conclusion=conclusion, blocked=blocked, human_review=True,
                 completeness='按本次提交材料处理，完整性未经独立验证' if complete else '材料完整性未确认',
                 limitation='本地模式仅做关键词初筛；不判断完整合规，不核实补充资料。' if mode == 'local' else 'AI 仅做第一轮审核；未独立验证资料真实性。上传材料经过视觉模型识别，文字与视觉判断仍需人工核对。',

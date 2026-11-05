@@ -86,7 +86,7 @@ function verdictFor(job){
   if(!job.report)return {tone:job.status==='failed'?'failed':'pending',label:job.status==='failed'?'审核失败':'等待机器审核',description:job.error||'报告尚未生成。',method:'尚无模型结论'};
   const report=job.report;
   if(report.mode==='local')return {tone:'sample',label:'本地规则样例',description:`发现 ${report.findings?.length||0} 条关键词线索；该样例不调用大模型，不代表完整审核。`,method:'本地关键词规则'};
-  const method=report.material?.pages?.length?'视觉模型识别 + 大模型语义审核 + 强制规则校验':'大模型语义审核 + 强制规则校验';
+  const method=(report.material?.pages?.length?'视觉模型识别 + 视觉模型直接审核原图 + 强制规则校验':'大模型语义审核 + 强制规则校验')+(report.review_model?` · ${report.review_model}`:'');
   if(report.scope?.status==='out_of_scope')return {tone:'pending',label:'非广告宣传材料',description:report.scope.reason,method};
   if(report.scope?.status==='uncertain')return {tone:'verify',label:'材料类型待确认',description:report.scope.reason,method};
   const findings=report.findings||[];

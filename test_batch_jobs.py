@@ -61,6 +61,30 @@ class BatchStoreTests(unittest.TestCase):
         self.assertTrue(second['extraction_cache_hit'])
         self.assertEqual(second['material']['pages'][0]['source_filename'], 'second.png')
 
+    def test_image_batch_keeps_report_when_ai_quote_cannot_be_located(self):
+        from reviewer import RULES
+        raw = b'example-image-bytes'
+        uri = 'data:image/png;base64,' + base64.b64encode(raw).decode()
+        material = dict(filename='case01.png', page_count=1, pages=[dict(page=1,
+            source_filename='case01.png', source_page=1, text='活动价 ¥69',
+            quality_issues=[], visual_notes='价格位于图片左下角', review_notes=[])])
+        checks = [dict(rule_id=rule['id'], status='未发现风险', quote='',
+                       reason='模拟返回', suggestion='') for rule in RULES]
+        checks[0].update(status='疑似风险', quote='活动价￥69', reason='价格需核对',
+            issues=[dict(status='疑似风险', quote='活动价￥69', reason='价格需核对',
+                         suggestion='核对原图', missing_evidence=[])])
+        model = dict(scope=dict(status='in_scope', reason='商品宣传'), checks=checks)
+        payload = dict(text='新款包包五折起', evidence='', complete=True, mode='ai',
+                       images=[dict(filename='case01.png', image=uri)])
+        with patch('batch_jobs.extract_bundle', return_value=material), \
+             patch('materials.review_image_parts', return_value=[{'type':'image_url','image_url':{'url':'data:image/png;base64,AAAA'}}]), \
+             patch('reviewer.call_json', return_value=model):
+            report = process_item(payload, lambda: {'api_key':'test', 'base_url':'https://example.com'}, self.store, 'batch')
+        self.assertEqual(report['review_model'], 'qwen-vl-plus')
+        self.assertIn('引用待核对', report['conclusion'])
+        self.assertEqual(report['findings'][0]['status'], '证据不足')
+        self.assertEqual(report['material']['pages'][0]['text'], '活动价 ¥69')
+
     def test_background_runner_finishes_a_batch_without_browser_requests(self):
         batch_id = self.store.create('客户甲', '活动', '信息流', [
             dict(external_id=str(i), text=f'帆布包售价{i}元。', mode='local') for i in range(100)

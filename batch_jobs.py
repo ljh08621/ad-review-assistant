@@ -335,9 +335,15 @@ def process_item(payload, configuration, store=None, batch_id=None):
         data["text"] += "".join(sections)
         cfg["_quality_issues"] = quality
         cfg["_visual_context"] = visual
+        if payload["mode"] == "ai":
+            cfg["_image_files"] = files
     started = time.monotonic()
     result = review(data, cfg)
     result["review_seconds"] = round(time.monotonic() - started, 1)
+    if payload["mode"] == "ai":
+        result["review_model"] = cfg.get("vision_model", "qwen-vl-plus") if material else cfg.get("model", "qwen-vl-plus")
+        if material:
+            result["extraction_model"] = cfg.get("vision_model", "qwen-vl-plus")
     if material:
         for finding in result["findings"]:
             if finding["quote"]:

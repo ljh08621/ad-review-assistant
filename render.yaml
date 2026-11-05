@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: ad-review-assistant
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py
+    healthCheckPath: /api/status
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.10
+      - key: HOST
+        value: 0.0.0.0
+      - key: DASHSCOPE_API_KEY
+        sync: false
+      - key: DASHSCOPE_BASE_URL
+        value: https://dashscope.aliyuncs.com/compatible-mode/v1
+      - key: QWEN_MODEL
+        value: qwen-vl-plus
+      - key: QWEN_VISION_MODEL
+        value: qwen-vl-plus
+      - key: APP_ACCESS_CODE
+        sync: false
